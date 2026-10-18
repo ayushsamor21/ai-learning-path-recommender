@@ -1,1097 +1,524 @@
-import re
+import html
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = Path(__file__).resolve().parent
+for path in (ROOT, APP_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
 import pandas as pd
 import streamlit as st
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
+from theme import THEME_CSS
+from src.auth import hash_password, normalize_email, password_issue, valid_email, verify_password
+from src.catalog import CAREER_SKILLS, DEFAULT_SKILLS
+from src.config import MONGODB_URI, mongo_uri_from_secrets
+from src.db import connect_store
+from src.nlp import analyze_user_goal
+from src.recommender import (
+    build_path,
+    calculate_skill_gaps,
+    progress_stats,
+    recommend,
+    weekly_plan,
+)
 
 st.set_page_config(
     page_title="LearnPath AI",
-    page_icon="LP",
-    layout="wide"
+    page_icon="◈",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ============================================================
-# CUSTOM CSS
-# ============================================================
+st.markdown(THEME_CSS, unsafe_allow_html=True)
 
-st.markdown("""
-<style>
 
-.block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-}
+@st.cache_resource
+def get_store():
+    uri = MONGODB_URI
+    if not uri:
+        try:
+            uri = mongo_uri_from_secrets(st.secrets)
+        except Exception:
+            uri = ""
+    return connect_store(uri)
 
-.hero {
-    padding: 28px;
-    border-radius: 18px;
-    border: 1px solid rgba(128,128,128,0.25);
-    margin-bottom: 25px;
-}
 
-.hero-title {
-    font-size: 42px;
-    font-weight: 800;
-    margin-bottom: 5px;
-}
+def init_state():
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "auth_mode" not in st.session_state:
+        st.session_state.auth_mode = "signin"
+    if "skills" not in st.session_state:
+        st.session_state.skills = dict(DEFAULT_SKILLS)
+    if "completed_ids" not in st.session_state:
+        st.session_state.completed_ids = []
+    if "generated" not in st.session_state:
+        st.session_state.generated = False
+    if "analysis" not in st.session_state:
+        st.session_state.analysis = None
+    if "recommendations" not in st.session_state:
+        st.session_state.recommendations = None
+    if "goal_text" not in st.session_state:
+        st.session_state.goal_text = ""
 
-.hero-subtitle {
-    font-size: 18px;
-    opacity: 0.75;
-}
 
-.card {
-    padding: 20px;
-    border-radius: 14px;
-    border: 1px solid rgba(128,128,128,0.25);
-    margin-bottom: 15px;
-}
+def account_key() -> str:
+    return st.session_state.user["email"]
 
-.phase {
-    padding: 20px;
-    border-radius: 14px;
-    border: 1px solid rgba(128,128,128,0.25);
-    margin-bottom: 14px;
-}
 
-.small-label {
-    font-size: 13px;
-    opacity: 0.65;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-# ============================================================
-# LEARNING RESOURCES
-# ============================================================
-
-resources = pd.DataFrame([
-    {
-        "title": "Python Fundamentals",
-        "type": "Course",
-        "level": "Beginner",
-        "skills": "python programming logic fundamentals",
-        "prerequisites": "None",
-        "duration": "2 weeks"
-    },
-    {
-        "title": "Advanced Python",
-        "type": "Course",
-        "level": "Intermediate",
-        "skills": "python oop functions algorithms programming",
-        "prerequisites": "Python Fundamentals",
-        "duration": "2 weeks"
-    },
-    {
-        "title": "NumPy for Data Science",
-        "type": "Course",
-        "level": "Beginner",
-        "skills": "python numpy arrays numerical computing data",
-        "prerequisites": "Python Fundamentals",
-        "duration": "1 week"
-    },
-    {
-        "title": "Pandas for Data Analysis",
-        "type": "Course",
-        "level": "Beginner",
-        "skills": "python pandas data analysis preprocessing",
-        "prerequisites": "Python Fundamentals, NumPy",
-        "duration": "1 week"
-    },
-    {
-        "title": "Statistics for Machine Learning",
-        "type": "Course",
-        "level": "Intermediate",
-        "skills": "statistics probability mathematics machine learning",
-        "prerequisites": "Python Fundamentals",
-        "duration": "2 weeks"
-    },
-    {
-        "title": "Machine Learning Fundamentals",
-        "type": "Course",
-        "level": "Intermediate",
-        "skills": "machine learning regression classification python statistics",
-        "prerequisites": "Python Pandas Statistics",
-        "duration": "3 weeks"
-    },
-    {
-        "title": "Deep Learning Fundamentals",
-        "type": "Course",
-        "level": "Advanced",
-        "skills": "deep learning neural networks tensorflow artificial intelligence",
-        "prerequisites": "Machine Learning",
-        "duration": "3 weeks"
-    },
-    {
-        "title": "SQL for Data Science",
-        "type": "Course",
-        "level": "Beginner",
-        "skills": "sql database queries data analysis",
-        "prerequisites": "None",
-        "duration": "1 week"
-    },
-    {
-        "title": "Git and GitHub",
-        "type": "Course",
-        "level": "Beginner",
-        "skills": "git github version control collaboration",
-        "prerequisites": "None",
-        "duration": "3 days"
-    },
-    {
-        "title": "Data Visualization",
-        "type": "Course",
-        "level": "Beginner",
-        "skills": "python pandas visualization charts analytics",
-        "prerequisites": "Python Pandas",
-        "duration": "1 week"
-    },
-    {
-        "title": "Student Performance Predictor",
-        "type": "Project",
-        "level": "Intermediate",
-        "skills": "python pandas machine learning regression",
-        "prerequisites": "Python Pandas Machine Learning",
-        "duration": "1 week"
-    },
-    {
-        "title": "Customer Churn Prediction",
-        "type": "Project",
-        "level": "Intermediate",
-        "skills": "python pandas classification machine learning",
-        "prerequisites": "Python Pandas Machine Learning",
-        "duration": "1 week"
-    },
-    {
-        "title": "Sales Analytics Dashboard",
-        "type": "Project",
-        "level": "Intermediate",
-        "skills": "python pandas sql visualization analytics",
-        "prerequisites": "Python SQL Pandas",
-        "duration": "1 week"
-    },
-    {
-        "title": "End-to-End ML Deployment",
-        "type": "Project",
-        "level": "Advanced",
-        "skills": "machine learning python streamlit deployment mlops",
-        "prerequisites": "Machine Learning Git",
-        "duration": "2 weeks"
+def persist(store, extra: dict | None = None):
+    user = st.session_state.user
+    if not user:
+        return
+    recs = st.session_state.recommendations
+    payload = {
+        "email": user["email"],
+        "name": user["name"],
+        "goal": st.session_state.get("career_goal", list(CAREER_SKILLS.keys())[0]),
+        "experience": st.session_state.get("experience_level", "Beginner"),
+        "interests": st.session_state.get("interests_text", ""),
+        "hours": st.session_state.get("hours_week", 10),
+        "goal_text": st.session_state.get("goal_text", ""),
+        "skills": dict(st.session_state.skills),
+        "completed_ids": list(st.session_state.completed_ids),
+        "generated": bool(st.session_state.generated),
+        "analysis": st.session_state.analysis,
+        "recommendations": recs.to_dict(orient="records") if isinstance(recs, pd.DataFrame) else recs,
     }
-])
+    if extra:
+        payload.update(extra)
+    store.upsert_learner(payload)
 
-# ============================================================
-# CAREER SKILL REQUIREMENTS
-# ============================================================
 
-career_skills = {
+def apply_learner(saved: dict | None):
+    if not saved:
+        return
+    skills = saved.get("skills") or {}
+    st.session_state.skills.update(skills)
+    for skill, value in skills.items():
+        st.session_state[f"skill-{skill}"] = int(value)
+    st.session_state.completed_ids = list(saved.get("completed_ids") or [])
+    for resource_id in st.session_state.completed_ids:
+        st.session_state[f"path-{resource_id}"] = True
+    if saved.get("goal"):
+        st.session_state["career_goal"] = saved["goal"]
+    if saved.get("experience"):
+        st.session_state["experience_level"] = saved["experience"]
+    if saved.get("interests"):
+        st.session_state["interests_text"] = saved["interests"]
+    if saved.get("hours"):
+        st.session_state["hours_week"] = int(saved["hours"])
+    if saved.get("name"):
+        st.session_state["display_name"] = saved["name"]
+    if saved.get("goal_text"):
+        st.session_state.goal_text = saved["goal_text"]
+        st.session_state["goal_area"] = saved["goal_text"]
+    st.session_state.analysis = saved.get("analysis")
+    recs = saved.get("recommendations")
+    if recs:
+        st.session_state.recommendations = pd.DataFrame(recs)
+        st.session_state.generated = True
+    elif saved.get("generated"):
+        st.session_state.generated = True
 
-    "Machine Learning Engineer": {
-        "Python": 80,
-        "NumPy": 70,
-        "Pandas": 75,
-        "Statistics": 75,
-        "Machine Learning": 90,
-        "Deep Learning": 70,
-        "Git": 60
-    },
 
-    "Data Scientist": {
-        "Python": 80,
-        "SQL": 75,
-        "Statistics": 85,
-        "NumPy": 65,
-        "Pandas": 80,
-        "Machine Learning": 80
-    },
+def sync_complete(store, resource_id: str, widget_key: str):
+    completed = set(st.session_state.completed_ids)
+    if st.session_state.get(widget_key):
+        completed.add(resource_id)
+    else:
+        completed.discard(resource_id)
+    st.session_state.completed_ids = list(completed)
+    persist(store)
 
-    "Software Engineer": {
-        "Python": 80,
-        "Git": 75
-    },
 
-    "Data Analyst": {
-        "Python": 65,
-        "SQL": 85,
-        "Statistics": 70,
-        "Pandas": 80,
-        "Data Visualization": 80
-    }
-}
+def render_course(resource: dict, why: str | None = None, complete_key: str | None = None, store=None):
+    skills = resource.get("skills") or []
+    skill_label = skills if isinstance(skills, str) else " · ".join(skills)
+    title = html.escape(str(resource.get("title") or ""))
+    description = html.escape(str(resource.get("description") or ""))
+    provider = html.escape(str(resource.get("provider") or "Catalog"))
+    prerequisites = html.escape(str(resource.get("prerequisites") or "None"))
 
-# ============================================================
-# LEARNER SKILLS
-# ============================================================
-
-current_skills = {
-    "Python": 70,
-    "SQL": 40,
-    "Statistics": 30,
-    "NumPy": 20,
-    "Pandas": 25,
-    "Machine Learning": 0,
-    "Deep Learning": 0,
-    "Git": 30,
-    "Data Visualization": 20
-}
-
-# ============================================================
-# CAREER ROADMAPS
-# ============================================================
-
-learning_paths = {
-
-    "Machine Learning Engineer": [
-        ("Phase 1", "Python Fundamentals",
-         "Build programming and problem-solving foundations.",
-         "Foundation"),
-
-        ("Phase 2", "NumPy and Pandas",
-         "Learn numerical computing and data preprocessing.",
-         "Data Processing"),
-
-        ("Phase 3", "Statistics for Machine Learning",
-         "Build probability and statistics foundations.",
-         "Statistics"),
-
-        ("Phase 4", "Machine Learning Fundamentals",
-         "Learn regression, classification and evaluation.",
-         "Machine Learning"),
-
-        ("Phase 5", "Student Performance Predictor",
-         "Build a real-world predictive ML project.",
-         "Project"),
-
-        ("Phase 6", "Deep Learning Fundamentals",
-         "Move into neural networks and advanced AI.",
-         "Advanced AI")
-    ],
-
-    "Data Scientist": [
-        ("Phase 1", "Python Fundamentals",
-         "Build programming foundations.",
-         "Foundation"),
-
-        ("Phase 2", "SQL for Data Science",
-         "Learn database querying and analysis.",
-         "Database"),
-
-        ("Phase 3", "Pandas for Data Analysis",
-         "Clean and analyze real-world datasets.",
-         "Data Analysis"),
-
-        ("Phase 4", "Statistics for Machine Learning",
-         "Develop statistical reasoning.",
-         "Statistics"),
-
-        ("Phase 5", "Machine Learning Fundamentals",
-         "Build predictive models.",
-         "Machine Learning"),
-
-        ("Phase 6", "Customer Churn Prediction",
-         "Apply data science to a real-world problem.",
-         "Project")
-    ],
-
-    "Software Engineer": [
-        ("Phase 1", "Python Fundamentals",
-         "Build programming foundations.",
-         "Foundation"),
-
-        ("Phase 2", "Advanced Python",
-         "Learn OOP, functions and advanced programming.",
-         "Programming"),
-
-        ("Phase 3", "Git and GitHub",
-         "Learn version control and collaboration.",
-         "Development"),
-
-        ("Phase 4", "Algorithms and Problem Solving",
-         "Strengthen algorithmic thinking.",
-         "Algorithms"),
-
-        ("Phase 5", "Software Development Project",
-         "Build a complete software application.",
-         "Project")
-    ],
-
-    "Data Analyst": [
-        ("Phase 1", "Python Fundamentals",
-         "Learn Python for analytics.",
-         "Foundation"),
-
-        ("Phase 2", "SQL for Data Science",
-         "Query and manipulate structured data.",
-         "Database"),
-
-        ("Phase 3", "Pandas for Data Analysis",
-         "Clean and analyze datasets.",
-         "Data Analysis"),
-
-        ("Phase 4", "Data Visualization",
-         "Create meaningful analytical dashboards.",
-         "Visualization"),
-
-        ("Phase 5", "Sales Analytics Dashboard",
-         "Build a complete analytics project.",
-         "Project")
-    ]
-}
-
-# ============================================================
-# NATURAL LANGUAGE PROFILE ANALYZER
-# ============================================================
-
-def analyze_user_goal(text):
-
-    text_lower = text.lower()
-
-    detected_skills = []
-
-    skill_keywords = {
-        "Python": ["python"],
-        "SQL": ["sql", "database"],
-        "Statistics": ["statistics", "statistical", "probability"],
-        "Machine Learning": [
-            "machine learning",
-            "ml"
-        ],
-        "Deep Learning": [
-            "deep learning",
-            "neural network"
-        ],
-        "Pandas": ["pandas"],
-        "NumPy": ["numpy"],
-        "Git": ["git", "github"],
-        "Data Visualization": [
-            "visualization",
-            "tableau",
-            "power bi"
-        ]
-    }
-
-    for skill, keywords in skill_keywords.items():
-
-        for keyword in keywords:
-
-            if keyword in text_lower:
-
-                detected_skills.append(skill)
-                break
-
-    timeline = "Not specified"
-
-    match = re.search(
-        r"(\d+)\s*(month|months|week|weeks|year|years)",
-        text_lower
+    st.markdown(
+        f"""
+        <div class="course">
+            <div class="course-meta">{provider} · {html.escape(str(resource.get("type")))} · {html.escape(str(resource.get("level")))} · {html.escape(str(resource.get("duration")))}</div>
+            <h3>{title}</h3>
+            <p>{description}</p>
+            <p><b>Skills:</b> {html.escape(str(skill_label))} &nbsp;·&nbsp; <b>Prerequisites:</b> {prerequisites}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-
-    if match:
-
-        timeline = (
-            f"{match.group(1)} "
-            f"{match.group(2)}"
-        )
-
-    objective = "Skill development"
-
-    if any(
-        word in text_lower
-        for word in [
-            "job",
-            "career",
-            "employment",
-            "placement"
-        ]
-    ):
-        objective = "Career / Job Preparation"
-
-    elif any(
-        word in text_lower
-        for word in [
-            "project",
-            "build",
-            "application"
-        ]
-    ):
-        objective = "Project Development"
-
-    return {
-        "skills": detected_skills,
-        "timeline": timeline,
-        "objective": objective
-    }
-
-# ============================================================
-# RECOMMENDATION ENGINE
-# ============================================================
-
-def get_recommendations(
-    goal,
-    experience,
-    interests,
-    user_goal
-):
-
-    query = (
-        goal + " " +
-        experience + " " +
-        interests + " " +
-        user_goal
-    )
-
-    documents = (
-        resources["skills"] + " " +
-        resources["title"]
-    ).tolist()
-
-    vectorizer = TfidfVectorizer(
-        stop_words="english"
-    )
-
-    matrix = vectorizer.fit_transform(
-        documents + [query]
-    )
-
-    similarity = cosine_similarity(
-        matrix[-1],
-        matrix[:-1]
-    ).flatten()
-
-    result = resources.copy()
-
-    result["similarity"] = similarity
-
-    difficulty_score = {
-        "Beginner": 1,
-        "Intermediate": 2,
-        "Advanced": 3
-    }
-
-    user_level = difficulty_score[experience]
-
-    result["difficulty_score"] = result[
-        "level"
-    ].map(difficulty_score)
-
-    result["level_fit"] = (
-        1 /
-        (
-            1 +
-            abs(
-                result["difficulty_score"]
-                - user_level
+    cols = st.columns([1, 1, 3])
+    with cols[0]:
+        url = resource.get("url")
+        if url:
+            st.link_button("Open resource", url, use_container_width=True)
+    if complete_key:
+        with cols[1]:
+            resource_id = resource["id"]
+            widget_key = f"{complete_key}-{resource_id}"
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = resource_id in st.session_state.completed_ids
+            st.checkbox(
+                "Completed",
+                key=widget_key,
+                on_change=sync_complete,
+                args=(store, resource_id, widget_key),
             )
-        )
+    if why:
+        st.markdown(f'<p class="why">{html.escape(str(why))}</p>', unsafe_allow_html=True)
+
+
+def render_auth(store):
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="gate">
+          <div class="gate-inner">
+            <div class="orb"></div>
+            <div class="kicker">LearnPath AI</div>
+            <h1 class="display">A path you can <span class="violet">actually follow</span>.</h1>
+            <p class="lead">Tell us the job you want. We find the skill gaps, sequence real courses, and keep your progress with your account.</p>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    result["score"] = (
-        result["similarity"] * 0.7 +
-        result["level_fit"] * 0.3
-    )
-
-    if experience == "Beginner":
-
-        result = result[
-            result["level"] != "Advanced"
-        ]
-
-    return result.sort_values(
-        "score",
-        ascending=False
-    ).head(6)
-
-# ============================================================
-# SKILL GAP ANALYZER
-# ============================================================
-
-def calculate_skill_gaps(goal):
-
-    required = career_skills[goal]
-
-    gaps = []
-
-    for skill, required_level in required.items():
-
-        current = current_skills.get(
-            skill,
-            0
-        )
-
-        gap = max(
-            required_level - current,
-            0
-        )
-
-        gaps.append({
-            "skill": skill,
-            "current": current,
-            "required": required_level,
-            "gap": gap
-        })
-
-    return sorted(
-        gaps,
-        key=lambda x: x["gap"],
-        reverse=True
-    )
-
-# ============================================================
-# HERO
-# ============================================================
-
-st.markdown(
-    """
-    <div class="hero">
-
-    <div class="hero-title">
-    LearnPath AI
-    </div>
-
-    <div class="hero-subtitle">
-    AI-Powered Personalized Learning Path Recommender
-    </div>
-
-    <p>
-    Transform your career goal into a personalized,
-    prerequisite-aware learning roadmap using
-    explainable AI and skill-gap analysis.
-    </p>
-
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
-st.sidebar.header("Learner Profile")
-
-name = st.sidebar.text_input(
-    "Name",
-    "Ajay"
-)
-
-goal = st.sidebar.selectbox(
-    "Career Goal",
-    list(career_skills.keys())
-)
-
-experience = st.sidebar.selectbox(
-    "Experience Level",
-    [
-        "Beginner",
-        "Intermediate",
-        "Advanced"
-    ]
-)
-
-interests = st.sidebar.text_input(
-    "Interests",
-    "AI, Python, Data Science"
-)
-
-hours = st.sidebar.slider(
-    "Learning Hours / Week",
-    2,
-    30,
-    10
-)
-
-st.sidebar.divider()
-
-st.sidebar.subheader(
-    "Profile Summary"
-)
-
-st.sidebar.write(
-    f"**Learner:** {name}"
-)
-
-st.sidebar.write(
-    f"**Target:** {goal}"
-)
-
-st.sidebar.write(
-    f"**Level:** {experience}"
-)
-
-st.sidebar.write(
-    f"**Commitment:** {hours} hrs/week"
-)
-
-# ============================================================
-# TABS
-# ============================================================
-
-tab1, tab2, tab3, tab4 = st.tabs([
-    "AI Assistant",
-    "Skill Gap",
-    "Learning Path",
-    "Progress"
-])
-
-# ============================================================
-# AI ASSISTANT
-# ============================================================
-
-with tab1:
-
-    st.header("AI Learning Assistant")
-
-    user_goal = st.text_area(
-        "Describe your learning goal",
-        value=(
-            f"I want to become a {goal} "
-            "and build real-world projects."
-        ),
-        height=120
-    )
-
-    if st.button(
-        "Generate Personalized Plan",
-        type="primary"
-    ):
-
-        profile = analyze_user_goal(
-            user_goal
-        )
-
-        recommendations = get_recommendations(
-            goal,
-            experience,
-            interests,
-            user_goal
-        )
-
-        gaps = calculate_skill_gaps(
-            goal
-        )
-
-        st.success(
-            f"Personalized plan generated for {name}."
-        )
-
-        # ----------------------------------------------------
-        # ANALYZED PROFILE
-        # ----------------------------------------------------
-
-        st.subheader(
-            "AI-Analyzed Learning Profile"
-        )
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-
-            st.markdown(
-                '<div class="card">',
-                unsafe_allow_html=True
-            )
-
-            st.write("Detected Skills")
-
-            if profile["skills"]:
-
-                st.write(
-                    ", ".join(
-                        profile["skills"]
-                    )
-                )
-
-            else:
-
-                st.write(
-                    "No explicit skills detected"
-                )
-
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True
-            )
-
-        with col2:
-
-            st.markdown(
-                '<div class="card">',
-                unsafe_allow_html=True
-            )
-
-            st.write("Learning Objective")
-
-            st.write(
-                profile["objective"]
-            )
-
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True
-            )
-
-        with col3:
-
-            st.markdown(
-                '<div class="card">',
-                unsafe_allow_html=True
-            )
-
-            st.write("Timeline")
-
-            st.write(
-                profile["timeline"]
-            )
-
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True
-            )
-
-        # ----------------------------------------------------
-        # EXPLANATION
-        # ----------------------------------------------------
-
-        top_gap = gaps[0]
-
-        st.subheader(
-            "Why This Learning Path?"
-        )
-
-        st.info(
-            f"The system identified **{top_gap['skill']}** "
-            f"as your largest skill gap at **{top_gap['gap']}%**. "
-            f"Recommendations are ranked using goal similarity, "
-            f"learner experience and skill-gap priorities."
-        )
-
-        # ----------------------------------------------------
-        # RECOMMENDATIONS
-        # ----------------------------------------------------
-
-        st.subheader(
-            "AI-Recommended Resources"
-        )
-
-        for _, resource in recommendations.iterrows():
-
-            with st.container(border=True):
-
-                col1, col2, col3 = st.columns(
-                    [3, 1, 1]
-                )
-
-                with col1:
-
-                    st.markdown(
-                        f"### {resource['title']}"
-                    )
-
-                with col2:
-
-                    st.write(
-                        resource["type"]
-                    )
-
-                with col3:
-
-                    st.write(
-                        resource["level"]
-                    )
-
-                st.write(
-                    f"Duration: "
-                    f"{resource['duration']}"
-                )
-
-                st.write(
-                    f"Skills: "
-                    f"{resource['skills'].title()}"
-                )
-
-                st.write(
-                    f"Prerequisites: "
-                    f"{resource['prerequisites']}"
-                )
-
-                st.success(
-                    "Recommended because it aligns "
-                    "with your target career, current "
-                    "level and learning objective."
-                )
-
-# ============================================================
-# SKILL GAP
-# ============================================================
-
-with tab2:
-
-    st.header(
-        "Skill Gap Analysis"
-    )
-
-    st.write(
-        f"Target career: **{goal}**"
-    )
-
-    gaps = calculate_skill_gaps(
-        goal
-    )
-
-    for item in gaps:
-
-        col1, col2, col3 = st.columns(
-            [2, 1, 1]
-        )
-
-        with col1:
-
-            st.write(
-                f"**{item['skill']}**"
-            )
-
-        with col2:
-
-            st.write(
-                f"Current: "
-                f"{item['current']}%"
-            )
-
-        with col3:
-
-            st.write(
-                f"Gap: "
-                f"{item['gap']}%"
-            )
-
-        st.progress(
-            min(
-                item["current"] / 100,
-                1
-            )
-        )
-
-    st.divider()
-
-    st.subheader(
-        "Top Priority Skills"
-    )
-
-    for item in gaps[:3]:
-
-        st.warning(
-            f"**{item['skill']}** — "
-            f"{item['gap']}% gap"
-        )
-
-# ============================================================
-# LEARNING PATH
-# ============================================================
-
-with tab3:
-
-    st.header(
-        f"Personalized Roadmap"
-    )
-
-    st.write(
-        f"Career target: **{goal}**"
-    )
-
-    st.write(
-        "The roadmap follows a prerequisite-aware "
-        "sequence from foundations to practical projects."
-    )
-
-    path = learning_paths[goal]
-
-    for phase, title, description, category in path:
-
-        st.markdown(
-            f"""
-            <div class="phase">
-
-            <h3>
-            {phase} — {title}
-            </h3>
-
-            <p>
-            {description}
-            </p>
-
-            <small>
-            Focus: {category}
-            </small>
-
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    st.divider()
-
-    st.subheader(
-        "Recommended Weekly Strategy"
-    )
-
-    st.write(
-        f"Based on your availability of "
-        f"**{hours} hours/week**, the system "
-        f"recommends consistent weekly progression "
-        f"through theory, practice and projects."
-    )
-
-# ============================================================
-# PROGRESS
-# ============================================================
-
-with tab4:
-
-    st.header(
-        "Learning Progress Dashboard"
-    )
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-
-        st.metric(
-            "Overall Progress",
-            "42%"
-        )
-
-    with col2:
-
-        st.metric(
-            "Courses Completed",
-            "4"
-        )
-
-    with col3:
-
-        st.metric(
-            "Projects Completed",
-            "1"
-        )
-
-    with col4:
-
-        st.metric(
-            "Skills Developing",
-            "5"
-        )
-
-    st.progress(
-        0.42
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Skill Development"
-    )
-
-    for skill in career_skills[goal]:
-
-        value = current_skills.get(
-            skill,
-            0
-        )
-
-        st.write(
-            f"**{skill}: {value}%**"
-        )
-
-        st.progress(
-            min(
-                value / 100,
-                1
-            )
-        )
-
-    st.divider()
-
-    gaps = calculate_skill_gaps(
-        goal
-    )
-
-    next_skill = gaps[0]["skill"]
-
-    st.subheader(
-        "Next Recommended Action"
-    )
-
-    st.success(
-        f"Focus next on **{next_skill}**. "
-        f"It currently represents your largest "
-        f"skill gap for the {goal} career path."
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Learner Feedback"
-    )
-
-    feedback = st.radio(
-        "How useful was your learning path?",
-        [
-            "Very useful",
-            "Useful",
-            "Too difficult",
-            "Too easy",
-            "Not useful"
-        ]
-    )
-
-    if st.button(
-        "Submit Feedback"
-    ):
-
-        st.success(
-            f"Feedback recorded: {feedback}"
-        )
-
-        if feedback == "Too difficult":
-
-            st.info(
-                "Adaptation: prioritize prerequisite "
-                "and beginner-level resources."
-            )
-
-        elif feedback == "Too easy":
-
-            st.info(
-                "Adaptation: prioritize intermediate "
-                "and advanced resources."
-            )
-
-        elif feedback == "Not useful":
-
-            st.info(
-                "Adaptation: reduce similar-resource "
-                "recommendations and explore alternatives."
-            )
-
+    left, mid, right = st.columns([1, 1.2, 1])
+    with mid:
+        sign_in, sign_up = st.columns(2)
+        with sign_in:
+            if st.button("Sign in", use_container_width=True, type="primary" if st.session_state.auth_mode == "signin" else "secondary"):
+                st.session_state.auth_mode = "signin"
+                st.rerun()
+        with sign_up:
+            if st.button("Create account", use_container_width=True, type="primary" if st.session_state.auth_mode == "signup" else "secondary"):
+                st.session_state.auth_mode = "signup"
+                st.rerun()
+
+        st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+        if st.session_state.auth_mode == "signup":
+            with st.form("signup"):
+                name = st.text_input("Name")
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                confirm = st.text_input("Confirm password", type="password")
+                submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
+            if submitted:
+                if not name.strip():
+                    st.error("Add your name.")
+                elif not valid_email(email):
+                    st.error("Enter a valid email.")
+                elif password_issue(password):
+                    st.error(password_issue(password))
+                elif password != confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    try:
+                        user = store.create_user(email, name, hash_password(password))
+                        store.upsert_learner(
+                            {
+                                "email": user["email"],
+                                "name": user["name"],
+                                "skills": dict(DEFAULT_SKILLS),
+                                "completed_ids": [],
+                            }
+                        )
+                        st.session_state.user = {"email": user["email"], "name": user["name"]}
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
         else:
+            with st.form("signin"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Continue", type="primary", use_container_width=True)
+            if submitted:
+                record = store.get_user(email)
+                if not record or not verify_password(password, record.get("password_hash", "")):
+                    st.error("Email or password is wrong.")
+                else:
+                    st.session_state.user = {
+                        "email": record["email"],
+                        "name": record.get("name") or record["email"],
+                    }
+                    saved = store.get_learner(normalize_email(email))
+                    st.session_state["_pending_load"] = saved
+                    st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.caption(f"Accounts and progress save to {store.backend}.")
+
+
+def render_app(store, resources):
+    pending = st.session_state.pop("_pending_load", None)
+    if pending:
+        apply_learner(pending)
+
+    user = st.session_state.user
+    st.markdown(
+        f"""
+        <div class="topbar">
+          <div class="brand">LearnPath <span class="violet">AI</span></div>
+          <div class="user-pill">{html.escape(user["name"])} · {html.escape(user["email"])}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.sidebar:
+        st.markdown("### Learner")
+        name = st.text_input("Name", value=user["name"], key="display_name")
+        goal = st.selectbox("Career goal", list(CAREER_SKILLS.keys()), key="career_goal")
+        experience = st.selectbox(
+            "Experience",
+            ["Beginner", "Intermediate", "Advanced"],
+            key="experience_level",
+        )
+        interests = st.text_input("Interests", value="Python, data, real projects", key="interests_text")
+        hours = st.slider("Hours / week", 2, 30, 10, key="hours_week")
+
+        st.divider()
+        st.caption("Self-assess the skills this career needs.")
+        for skill in CAREER_SKILLS[goal]:
+            skill_key = f"skill-{skill}"
+            if skill_key not in st.session_state:
+                st.session_state[skill_key] = int(
+                    st.session_state.skills.get(skill, DEFAULT_SKILLS.get(skill, 0))
+                )
+            st.slider(skill, min_value=0, max_value=100, step=5, key=skill_key)
+            st.session_state.skills[skill] = int(st.session_state[skill_key])
+
+        st.divider()
+        if st.button("Save to backend", use_container_width=True):
+            persist(store, extra={"name": name, "goal": goal, "experience": experience, "interests": interests, "hours": hours})
+            st.success(f"Saved to {store.backend}.")
+        if st.button("Log out", use_container_width=True):
+            persist(store)
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+        st.caption(f"Source: {store.backend}")
+
+    st.session_state.user["name"] = name
+
+    gaps = calculate_skill_gaps(goal, st.session_state.skills)
+    path = build_path(goal)
+    stats = progress_stats(path, st.session_state.completed_ids)
+
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-kicker">Personalized learning intelligence</div>
+            <h1 class="hero-title">Turn a career goal into a sequenced, explainable path.</h1>
+            <p class="hero-copy">
+                LearnPath AI reads your goal, finds skill gaps, then ranks real courses and projects
+                with TF-IDF, cosine similarity, and prerequisites. Your account keeps the plan.
+            </p>
+            <div class="chip-row">
+                <div class="chip hot">TF-IDF ranking</div>
+                <div class="chip">Skill-gap aware</div>
+                <div class="chip">Prerequisite roadmap</div>
+                <div class="chip">Saved with login</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Plan", "Skill gaps", "Roadmap", "Catalog", "Progress"]
+    )
+
+    with tab1:
+        st.subheader("Describe where you want to go")
+        if "goal_area" not in st.session_state:
+            st.session_state.goal_area = st.session_state.goal_text or (
+                f"I know some Python. I want to become a {goal} and get job-ready in 6 months."
+            )
+        user_goal = st.text_area(
+            "Your goal",
+            height=110,
+            label_visibility="collapsed",
+            key="goal_area",
+        )
+        st.session_state.goal_text = user_goal
+
+        if st.button("Generate personalized plan", type="primary"):
+            analysis = analyze_user_goal(user_goal)
+            recs = recommend(
+                goal=goal,
+                experience=experience,
+                interests=interests,
+                user_goal=user_goal,
+                resources=resources,
+                gaps=gaps,
+            )
+            st.session_state.analysis = analysis
+            st.session_state.recommendations = recs
+            st.session_state.generated = True
+            persist(store)
+
+        if st.session_state.generated and st.session_state.analysis is not None:
+            analysis = st.session_state.analysis
+            recs = st.session_state.recommendations
+            if isinstance(recs, list):
+                recs = pd.DataFrame(recs)
+            top_gap = gaps[0] if gaps else {"skill": "foundations", "gap": 0}
+
+            c1, c2, c3, c4 = st.columns(4)
+            cards = [
+                ("Detected skills", ", ".join(analysis.get("skills") or []) or "None stated"),
+                ("Objective", analysis.get("objective", "")),
+                ("Timeline", analysis.get("timeline", "")),
+                ("Largest gap", f"{top_gap['skill']} · {top_gap['gap']}%"),
+            ]
+            for col, (label, value) in zip([c1, c2, c3, c4], cards):
+                with col:
+                    st.markdown(
+                        f'<div class="stat"><b>{html.escape(str(value))}</b><span>{html.escape(label)}</span></div>',
+                        unsafe_allow_html=True,
+                    )
 
             st.info(
-                "Adaptation: maintain the current "
-                "learning strategy."
+                f"{name}, the plan targets **{goal}** at a **{experience.lower()}** level. "
+                f"{top_gap['skill']} is the widest gap, so early resources lean that direction."
             )
 
-# ============================================================
-# FOOTER
-# ============================================================
+            st.markdown("#### Recommended next resources")
+            for _, row in recs.iterrows():
+                render_course(row.to_dict(), why=row.get("why"), store=store)
+        else:
+            st.write("Write a short goal, then generate a plan. Completions and the path save to your account.")
 
-st.divider()
+    with tab2:
+        st.subheader(f"What {goal}s typically need")
+        st.write("White is where you are. Coral marks the remaining gap.")
+        for item in gaps:
+            st.markdown('<div class="gap-row">', unsafe_allow_html=True)
+            left, right = st.columns([3, 1])
+            with left:
+                st.write(f"**{item['skill']}** — {item['current']}% of {item['required']}%")
+                st.progress(min(item["current"] / 100, 1.0))
+            with right:
+                st.metric("Gap", f"{item['gap']}%")
+            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("#### Start here")
+        for item in gaps[:3]:
+            if item["gap"] > 0:
+                st.warning(f"**{item['skill']}** still needs about {item['gap']} points.")
 
-st.caption(
-    "LearnPath AI | Explainable + Adaptive Personalized Learning"
-)
+    with tab3:
+        st.subheader("Prerequisite-aware sequence")
+        st.write(weekly_plan(hours, path))
+        for index, step in enumerate(path, start=1):
+            done = "Done" if step["id"] in st.session_state.completed_ids else "Up next"
+            st.markdown(
+                f"""
+                <div class="phase">
+                    <div class="phase-index">{index:02d}</div>
+                    <div class="phase-copy"><small>{html.escape(str(step['phase']))} · {html.escape(str(step['focus']))} · {done}</small></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            render_course(step, complete_key="path", store=store)
 
+    with tab4:
+        st.subheader("Full learning catalog")
+        st.write("Curated courses and projects with direct links. Filter, then open the ones that fit.")
+        types = st.multiselect("Type", sorted({item["type"] for item in resources}), default=["Course", "Project"])
+        levels = st.multiselect(
+            "Level",
+            ["Beginner", "Intermediate", "Advanced"],
+            default=["Beginner", "Intermediate", "Advanced"],
+        )
+        query = st.text_input("Search title, provider, or skill")
+        filtered = []
+        for item in resources:
+            if item["type"] not in types or item["level"] not in levels:
+                continue
+            blob = " ".join(
+                [
+                    item["title"],
+                    item["provider"],
+                    item["description"],
+                    " ".join(item.get("skills") or []),
+                ]
+            ).lower()
+            if query and query.lower() not in blob:
+                continue
+            filtered.append(item)
+        st.caption(f"{len(filtered)} resources")
+        for item in filtered:
+            render_course(item, store=store)
+
+    with tab5:
+        st.subheader("Progress")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Roadmap progress", f"{stats['overall']}%")
+        m2.metric("Courses", f"{stats['courses_done']}/{stats['courses_total']}")
+        m3.metric("Projects", f"{stats['projects_done']}/{stats['projects_total']}")
+        m4.metric("Hours / week", hours)
+        st.progress(stats["overall"] / 100)
+
+        remaining = stats["remaining"]
+        if remaining:
+            nxt = remaining[0]
+            st.success(f"Next step: **{nxt['title']}** — {nxt['focus'].lower()}.")
+            st.link_button("Open next resource", nxt["url"])
+        else:
+            st.success("Roadmap complete. Add a harder catalog item or a new career target.")
+
+        if st.button("Save progress"):
+            persist(store)
+            store.save_progress(account_key(), list(st.session_state.completed_ids), dict(st.session_state.skills))
+            st.toast(f"Progress saved to {store.backend}.")
+
+        st.divider()
+        st.subheader("Was this path useful?")
+        feedback = st.radio(
+            "Feedback",
+            ["Very useful", "Useful", "Too difficult", "Too easy", "Not useful"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        if st.button("Submit feedback"):
+            persist(store)
+            store.add_feedback(account_key(), feedback)
+            adaptations = {
+                "Too difficult": "Next recommendations will stay closer to beginner and prerequisite resources.",
+                "Too easy": "Next recommendations will lean intermediate and advanced work.",
+                "Not useful": "We will de-emphasize similar titles and surface alternatives from the catalog.",
+            }
+            st.info(adaptations.get(feedback, "We’ll keep the current sequencing strategy."))
+
+    st.markdown(
+        f'<p class="footer-note">LearnPath AI · Pathwise-inspired dark UI · accounts persist in {html.escape(store.backend)}</p>',
+        unsafe_allow_html=True,
+    )
+
+
+init_state()
+store = get_store()
+resources = store.list_resources()
+
+if st.session_state.user is None:
+    render_auth(store)
+else:
+    render_app(store, resources)

@@ -14,7 +14,7 @@ https://ai-learning-path-recommender-uuyrf2ejxzxg7zs3dkbfzz.streamlit.app/
 
 ## GitHub Repository
 
-https://github.com/yesajayyy/ai-learning-path-recommender
+https://github.com/ayushsamor21/ai-learning-path-recommender
 
 ---
 
@@ -229,6 +229,7 @@ The dashboard provides an overview of learning progress and recommended next act
 | Machine Learning | Scikit-learn |
 | NLP / Recommendation | TF-IDF |
 | Similarity | Cosine Similarity |
+| Database | MongoDB (with local JSON fallback) |
 | Version Control | Git |
 | Repository | GitHub |
 | Deployment | Streamlit Community Cloud |
@@ -242,14 +243,15 @@ ai-learning-path-recommender/
 +-- app/
 |   +-- app.py
 |
-+-- data/
-|   +-- resources.csv
-|
 +-- src/
+|   +-- catalog.py
+|   +-- db.py
+|   +-- nlp.py
 |   +-- recommender.py
 |
 +-- app.py
 +-- requirements.txt
++-- .env.example
 +-- README.md
 +-- .gitignore
 
@@ -265,7 +267,7 @@ ai-learning-path-recommender/
 
 ### Clone Repository
 
-git clone https://github.com/yesajayyy/ai-learning-path-recommender.git
+git clone https://github.com/ayushsamor21/ai-learning-path-recommender.git
 
 ### Navigate to Project
 
@@ -287,6 +289,14 @@ venv\Scripts\activate
 
 pip install -r requirements.txt
 
+### Configure MongoDB (optional)
+
+Copy `.env.example` to `.env` and set `MONGODB_URI`.
+
+If MongoDB is unavailable, the app stores profiles, progress and feedback in a local JSON file.
+
+On Streamlit Community Cloud, add `MONGODB_URI` under App settings → Secrets.
+
 ### Run Application
 
 streamlit run app/app.py
@@ -305,7 +315,7 @@ https://ai-learning-path-recommender-uuyrf2ejxzxg7zs3dkbfzz.streamlit.app/
 
 GitHub Repository:
 
-https://github.com/yesajayyy/ai-learning-path-recommender
+https://github.com/ayushsamor21/ai-learning-path-recommender
 
 ---
 
@@ -349,8 +359,8 @@ This makes the system more than a simple course search engine.
 
 ## Current Limitations
 
-- The learning-resource dataset is a prototype/local dataset.
-- Skill levels are primarily based on learner profile information.
+- The learning-resource catalog is curated (with real course/project links) rather than fetched from a live course API.
+- Skill levels are based on learner self-assessment.
 - Natural-language analysis uses structured/rule-based extraction.
 - Recommendations are content-based.
 - The current prototype does not use an external generative AI API.
