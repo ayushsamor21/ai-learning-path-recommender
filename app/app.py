@@ -12,7 +12,6 @@ import pandas as pd
 import streamlit as st
 
 from theme import THEME_CSS
-from src.auth import hash_password, normalize_email, password_issue, valid_email, verify_password
 from src.catalog import CAREER_SKILLS, DEFAULT_SKILLS
 from src.config import MONGODB_URI, mongo_uri_from_secrets
 from src.db import connect_store
@@ -34,6 +33,8 @@ st.set_page_config(
 
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
+DEMO_USER = {"email": "demo@learnpath.ai", "name": "Demo Learner"}
+
 
 @st.cache_resource
 def get_store():
@@ -47,10 +48,8 @@ def get_store():
 
 
 def init_state():
-    if "user" not in st.session_state:
-        st.session_state.user = None
-    if "auth_mode" not in st.session_state:
-        st.session_state.auth_mode = "signin"
+    if "user" not in st.session_state or not st.session_state.user:
+        st.session_state.user = dict(DEMO_USER)
     if "skills" not in st.session_state:
         st.session_state.skills = dict(DEFAULT_SKILLS)
     if "completed_ids" not in st.session_state:
@@ -175,101 +174,18 @@ def render_course(resource: dict, why: str | None = None, complete_key: str | No
         st.markdown(f'<p class="why">{html.escape(str(why))}</p>', unsafe_allow_html=True)
 
 
-def render_auth(store):
-    st.markdown(
-        """
-        <style>
-        [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {
-            display: none !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        """
-        <div class="gate">
-          <div class="gate-inner">
-            <div class="orb"></div>
-            <div class="kicker">LearnPath AI</div>
-            <h1 class="display">A path you can <span class="violet">actually follow</span>.</h1>
-            <p class="lead">Tell us the job you want. We find the skill gaps, sequence real courses, and keep your progress with your account.</p>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    left, mid, right = st.columns([1, 1.2, 1])
-    with mid:
-        sign_in, sign_up = st.columns(2)
-        with sign_in:
-            if st.button("Sign in", use_container_width=True, type="primary" if st.session_state.auth_mode == "signin" else "secondary"):
-                st.session_state.auth_mode = "signin"
-                st.rerun()
-        with sign_up:
-            if st.button("Create account", use_container_width=True, type="primary" if st.session_state.auth_mode == "signup" else "secondary"):
-                st.session_state.auth_mode = "signup"
-                st.rerun()
-
-        st.markdown('<div class="auth-card">', unsafe_allow_html=True)
-        if st.session_state.auth_mode == "signup":
-            with st.form("signup"):
-                name = st.text_input("Name")
-                email = st.text_input("Email")
-                password = st.text_input("Password", type="password")
-                confirm = st.text_input("Confirm password", type="password")
-                submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
-            if submitted:
-                if not name.strip():
-                    st.error("Add your name.")
-                elif not valid_email(email):
-                    st.error("Enter a valid email.")
-                elif password_issue(password):
-                    st.error(password_issue(password))
-                elif password != confirm:
-                    st.error("Passwords do not match.")
-                else:
-                    try:
-                        user = store.create_user(email, name, hash_password(password))
-                        store.upsert_learner(
-                            {
-                                "email": user["email"],
-                                "name": user["name"],
-                                "skills": dict(DEFAULT_SKILLS),
-                                "completed_ids": [],
-                            }
-                        )
-                        st.session_state.user = {"email": user["email"], "name": user["name"]}
-                        st.rerun()
-                    except ValueError as exc:
-                        st.error(str(exc))
-        else:
-            with st.form("signin"):
-                email = st.text_input("Email")
-                password = st.text_input("Password", type="password")
-                submitted = st.form_submit_button("Continue", type="primary", use_container_width=True)
-            if submitted:
-                record = store.get_user(email)
-                if not record or not verify_password(password, record.get("password_hash", "")):
-                    st.error("Email or password is wrong.")
-                else:
-                    st.session_state.user = {
-                        "email": record["email"],
-                        "name": record.get("name") or record["email"],
-                    }
-                    saved = store.get_learner(normalize_email(email))
-                    st.session_state["_pending_load"] = saved
-                    st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.caption(f"Accounts and progress save to {store.backend}.")
+def load_demo_learner(store):
+    if st.session_state.get("_demo_loaded"):
+        return
+    saved = store.get_learner(DEMO_USER["email"])
+    if saved:
+        apply_learner(saved)
+        if saved.get("name"):
+            st.session_state.user["name"] = saved["name"]
+    st.session_state._demo_loaded = True
 
 
 def render_app(store, resources):
-    pending = st.session_state.pop("_pending_load", None)
-    if pending:
-        apply_learner(pending)
-
     user = st.session_state.user
     st.markdown(
         f"""
@@ -308,8 +224,7 @@ def render_app(store, resources):
         if st.button("Save to backend", use_container_width=True):
             persist(store, extra={"name": name, "goal": goal, "experience": experience, "interests": interests, "hours": hours})
             st.success(f"Saved to {store.backend}.")
-        if st.button("Log out", use_container_width=True):
-            persist(store)
+        if st.button("Reset demo session", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
@@ -517,8 +432,5 @@ def render_app(store, resources):
 init_state()
 store = get_store()
 resources = store.list_resources()
-
-if st.session_state.user is None:
-    render_auth(store)
-else:
-    render_app(store, resources)
+load_demo_learner(store)
+render_app(store, resources)
